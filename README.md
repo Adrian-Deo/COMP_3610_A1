@@ -1,0 +1,2 @@
+# COMP_3610_A1
+Assignment 1 for COMP 3610 BIG DATA 
