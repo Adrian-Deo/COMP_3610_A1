@@ -1,6 +1,0 @@
-streamlit
-pandas
-numpy
-polars
-plotly
-requests
