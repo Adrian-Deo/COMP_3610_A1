@@ -4,7 +4,6 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
-import polars as pl
 import requests
 import os
 from pathlib import Path
@@ -23,37 +22,60 @@ zone_data_file = "taxi_zone_lookup.csv"
 def download_file(url, file_path):
     file_path = Path(file_path)
     if not file_path.exists():
-        print(f"Downloading from: {url}")
-        response = requests.get(url)
-        
-        with open(file_path, 'wb') as f:
-            f.write(response.content)
-        
-        file_size_mb = os.path.getsize(file_path) / 1e6
-        print(f"Downloaded: {file_path.name} ({file_size_mb:.1f} MB)")
-        return True
+        try:
+            response = requests.get(url, timeout=30)
+            response.raise_for_status()
+            with open(file_path, 'wb') as f:
+                f.write(response.content)
+            file_size_mb = os.path.getsize(file_path) / 1e6
+            print(f"Downloaded: {file_path.name} ({file_size_mb:.1f} MB)")
+            return True
+        except Exception as e:
+            st.error(f"Failed to download {url}: {e}")
+            st.stop()
     else:
         file_size_mb = os.path.getsize(file_path) / 1e6
         print(f"File already exists: {file_path.name} ({file_size_mb:.1f} MB)")
         return False
 
-download_file(trip_data_url, trip_data_file)
-download_file(zone_data_url, zone_data_file)
+@st.cache_data
+def load_data():
+    download_file(trip_data_url, trip_data_file)
+    download_file(zone_data_url, zone_data_file)
 
-df = pd.read_parquet(trip_data_file)
-zone_lookup = pd.read_csv(zone_data_file)[['LocationID', 'Zone']]
+    cols = [
+        'tpep_pickup_datetime', 'tpep_dropoff_datetime',
+        'PULocationID', 'DOLocationID',
+        'passenger_count', 'trip_distance',
+        'fare_amount', 'tip_amount', 'payment_type'
+    ]
+    df = pd.read_parquet(trip_data_file, columns=cols)
+    zone_lookup = pd.read_csv(zone_data_file)[['LocationID', 'Zone']]
 
-df['pickup_hour'] = df['tpep_pickup_datetime'].dt.hour
-df['pickup_weekday'] = df['tpep_pickup_datetime'].dt.dayofweek
-df['pickup_date'] = df['tpep_pickup_datetime'].dt.date
-df['trip_duration_min'] = (
-    df['tpep_dropoff_datetime'] - df['tpep_pickup_datetime']
-).dt.total_seconds() / 60
-df['tip_pct'] = (df['tip_amount'] / df['fare_amount'] * 100).fillna(0)
+    df['tpep_pickup_datetime'] = pd.to_datetime(df['tpep_pickup_datetime'])
+    df['tpep_dropoff_datetime'] = pd.to_datetime(df['tpep_dropoff_datetime'])
 
-df = df[(df['fare_amount'] > 0) & (df['fare_amount'] < 500)]
-df = df[(df['trip_distance'] > 0) & (df['trip_distance'] < 50)]
-df = df[(df['trip_duration_min'] > 1) & (df['trip_duration_min'] < 180)]
+    df['pickup_hour'] = df['tpep_pickup_datetime'].dt.hour
+    df['pickup_weekday'] = df['tpep_pickup_datetime'].dt.dayofweek
+    df['pickup_date'] = df['tpep_pickup_datetime'].dt.date
+    df['trip_duration_min'] = (
+        df['tpep_dropoff_datetime'] - df['tpep_pickup_datetime']
+    ).dt.total_seconds() / 60
+    df['tip_pct'] = (df['tip_amount'] / df['fare_amount'] * 100).fillna(0)
+
+    df = df[(df['fare_amount'] > 0) & (df['fare_amount'] < 500)]
+    df = df[(df['trip_duration_min'] > 1) & (df['trip_duration_min'] < 180)]
+
+    df['PULocationID'] = df['PULocationID'].astype('category')
+    df['DOLocationID'] = df['DOLocationID'].astype('category')
+
+    payment_map = {1: 'Credit Card', 2: 'Cash', 3: 'No Charge', 4: 'Dispute', 5: 'Unknown'}
+    df['payment_name'] = df['payment_type'].map(payment_map)
+
+    return df, zone_lookup
+
+with st.spinner('Loading data for visualizations...'):
+    df, zone_lookup = load_data()
 
 # ============== SIDEBAR FILTERS ==============
 st.sidebar.header("Filters")
@@ -106,42 +128,30 @@ dist_min, dist_max = st.sidebar.slider(
 )
 
 st.sidebar.subheader("Payment")
-payment_map = {1: 'Credit Card', 2: 'Cash', 3: 'No Charge', 4: 'Dispute', 5: 'Unknown'}
-df['payment_name'] = df['payment_type'].map(payment_map)
 payment_options = df['payment_name'].dropna().unique().tolist()
 selected_payments = st.sidebar.multiselect(
     "Payment method(s):",
     options=payment_options,
-    default=payment_options  
+    default=payment_options
 )
 
 # ============== APPLY FILTERS ==============
-filtered_df = df.copy()
-
-filtered_df = filtered_df[
-    (filtered_df['pickup_date'] >= start_date) &
-    (filtered_df['pickup_date'] <= end_date)
-]
-
-filtered_df = filtered_df[
-    (filtered_df['pickup_hour'] >= hour_min) &
-    (filtered_df['pickup_hour'] <= hour_max)
+# No copy — just filter directly
+filtered_df = df[
+    (df['pickup_date'] >= start_date) &
+    (df['pickup_date'] <= end_date) &
+    (df['pickup_hour'] >= hour_min) &
+    (df['pickup_hour'] <= hour_max) &
+    (df['fare_amount'] >= fare_min) &
+    (df['fare_amount'] <= fare_max) &
+    (df['trip_distance'] >= dist_min) &
+    (df['trip_distance'] <= dist_max)
 ]
 
 if selected_passengers != 'All':
     filtered_df = filtered_df[filtered_df['passenger_count'] == selected_passengers]
 
-filtered_df = filtered_df[
-    (filtered_df['fare_amount'] >= fare_min) &
-    (filtered_df['fare_amount'] <= fare_max)
-]
-
-filtered_df = filtered_df[
-    (filtered_df['trip_distance'] >= dist_min) &
-    (filtered_df['trip_distance'] <= dist_max)
-]
-
-if selected_payments:  
+if selected_payments:
     filtered_df = filtered_df[filtered_df['payment_name'].isin(selected_payments)]
 
 st.sidebar.divider()
@@ -158,9 +168,9 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(
 )
 
 with tab1:
-    st.subheader("Breakdown of payment types ")
-    st.caption("Credit card payments dominate, while cash has secondmost amount of trips. Both 'No Charge' and 'Dispute' are very rare, and 'Unknown' is negligible.")
-    
+    st.subheader("Breakdown of payment types")
+    st.caption("Credit card payments dominate, while cash has second most amount of trips. Both 'No Charge' and 'Dispute' are very rare, and 'Unknown' is negligible.")
+
     payment_counts = filtered_df['payment_name'].value_counts().reset_index()
     payment_counts.columns = ['payment_type', 'count']
 
@@ -169,11 +179,11 @@ with tab1:
         values='count',
         names='payment_type',
         title='Payment Method Breakdown',
-        hole=0.3  
+        hole=0.3
     )
     fig.update_traces(textposition='inside', textinfo='percent+label')
     fig.update_layout(height=500)
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True)  # Replace with width='stretch' after deprecation
 
 with tab2:
     st.subheader("Distribution of trip distances")
@@ -213,13 +223,11 @@ with tab3:
     fig2.update_xaxes(tickmode='linear', tick0=0, dtick=1)
     st.plotly_chart(fig2, use_container_width=True)
 
-
 with tab4:
     st.subheader("Trips by day of week and hour")
-    st.caption("The heatmap displays (monday-Friday) on weekdays rush hours (8-9am and 5-6pm) are the busiest times for taxi trips, while late nights and (Saturday-Sunday) weekends are decently not as busy.")
+    st.caption("The heatmap displays Monday–Friday on weekdays rush hours (8–9am and 5–6pm) are the busiest times for taxi trips, while late nights and weekends are decently not as busy.")
 
     heatmap_data = filtered_df.groupby(['pickup_weekday', 'pickup_hour']).size().unstack(fill_value=0)
-
     heatmap_data = heatmap_data.reindex(columns=range(24), fill_value=0)
     heatmap_data = heatmap_data.reindex(index=range(7), fill_value=0)
 
@@ -229,8 +237,8 @@ with tab4:
     fig = px.imshow(
         heatmap_data,
         labels=dict(x='Hour of Day', y='Day of Week', color='Trips'),
-        x=list(range(24)),               
-        y=list(heatmap_data.index),      
+        x=list(range(24)),
+        y=list(heatmap_data.index),
         color_continuous_scale='YlOrRd',
         title='When Are Taxis Busiest?'
     )
@@ -245,7 +253,7 @@ with tab5:
     zone_counts.columns = ['LocationID', 'trip_count']
     zone_counts = zone_counts.merge(zone_lookup, on='LocationID', how='left')
     zone_counts['Zone'] = zone_counts['Zone'].fillna(zone_counts['LocationID'].astype(str))
-    top_zones = zone_counts.head(10).sort_values('trip_count', ascending=True) 
+    top_zones = zone_counts.head(10).sort_values('trip_count', ascending=True)
 
     fig = px.bar(
         top_zones,
@@ -257,5 +265,5 @@ with tab5:
         color='trip_count',
         color_continuous_scale='Viridis'
     )
-    fig.update_layout(height=500, yaxis={'categoryorder':'total ascending'})
+    fig.update_layout(height=500, yaxis={'categoryorder': 'total ascending'})
     st.plotly_chart(fig, use_container_width=True)
