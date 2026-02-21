@@ -159,7 +159,7 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(
 
 with tab1:
     st.subheader("Breakdown of payment types ")
-    st.caption("The fundamental relationship in taxi pricing")
+    st.caption("Credit card payments dominate, while cash has secondmost amount of trips. Both 'No Charge' and 'Dispute' are very rare, and 'Unknown' is negligible.")
     
     payment_counts = filtered_df['payment_name'].value_counts().reset_index()
     payment_counts.columns = ['payment_type', 'count']
@@ -177,6 +177,7 @@ with tab1:
 
 with tab2:
     st.subheader("Distribution of trip distances")
+    st.caption("Most trips are short, but there are some long outliers. The median distance is around 1.7 miles.")
 
     fig = px.histogram(
         filtered_df,
@@ -197,8 +198,8 @@ with tab2:
 
 with tab3:
     st.subheader("Average fare by hour of day")
+    st.caption("The price of the trips tends to be higher during the morning and evening rush hours, likely due to increased demand and traffic congestion.")
 
-    st.caption("Average fare also varies by hour")
     hourly_fare = filtered_df.groupby('pickup_hour')['fare_amount'].mean().reset_index(name='avg_fare')
     fig2 = px.line(
         hourly_fare,
@@ -215,11 +216,12 @@ with tab3:
 
 with tab4:
     st.subheader("Trips by day of week and hour")
-    st.caption("Hour vs Day of Week - spot the patterns!")
+    st.caption("The heatmap displays (monday-Friday) on weekdays rush hours (8-9am and 5-6pm) are the busiest times for taxi trips, while late nights and (Saturday-Sunday) weekends are decently not as busy.")
 
-    heatmap_data = filtered_df.groupby(
-        ['pickup_weekday', 'pickup_hour']
-    ).size().unstack(fill_value=0)
+    heatmap_data = filtered_df.groupby(['pickup_weekday', 'pickup_hour']).size().unstack(fill_value=0)
+
+    heatmap_data = heatmap_data.reindex(columns=range(24), fill_value=0)
+    heatmap_data = heatmap_data.reindex(index=range(7), fill_value=0)
 
     weekday_names = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
     heatmap_data.index = [weekday_names[i] for i in heatmap_data.index]
@@ -227,17 +229,17 @@ with tab4:
     fig = px.imshow(
         heatmap_data,
         labels=dict(x='Hour of Day', y='Day of Week', color='Trips'),
-        x=list(range(24)),
-        y=list(heatmap_data.index),
+        x=list(range(24)),               
+        y=list(heatmap_data.index),      
         color_continuous_scale='YlOrRd',
         title='When Are Taxis Busiest?'
     )
     fig.update_layout(height=400)
     st.plotly_chart(fig, use_container_width=True)
 
-
 with tab5:
     st.subheader("Top 10 pickup zones by trip count")
+    st.caption("The busiest pickup zones are mostly in Manhattan, especially around Midtown and the Financial District. Some popular areas in Brooklyn and Queens also make the list.")
 
     zone_counts = filtered_df['PULocationID'].value_counts().reset_index()
     zone_counts.columns = ['LocationID', 'trip_count']
